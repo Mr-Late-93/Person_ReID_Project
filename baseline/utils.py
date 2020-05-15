@@ -13,12 +13,63 @@ import imgaug as ia
 from keras.applications.mobilenet_v2 import preprocess_input
 import numpy as np
 import cv2
+import os
+import tensorflow as tf
+from tensorflow.python.keras.losses import categorical_crossentropy
+from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import math_ops
+
 np.random.seed(1024)
+
+
+def extract_file(data_foller, data):
+    image_names = sorted(os.listdir(data_foller))
+    img_path = [os.path.join(data_foller, x) for x in image_names[:-2]]
+    img_name = [x for x in image_names[:-2]]
+    print("image name top 10 :", img_name[:10])
+    print("image path top 10 :", img_path[:10])
+
+    if data == "train":
+        person_ids = [x[:4] for x in img_name]
+        nbr_persion_ids = len(person_ids)
+        print("numbers of persion ids:", nbr_persion_ids)
+        return img_path, person_ids, nbr_persion_ids
+
+    elif data == "test":
+
+        return img_path
+
+
+# def categorical_crossentropy_label_smoothing(y_ture, y_pred):
+#     """
+#         对标签y-hot 进行平滑操作
+#         example:[0, 0, 1, 0, 0] ==> [0.25, 0.25, 0.9, 0.25, 0.25]
+#         参考：https://www.lizenghai.com/archives/31315.html
+#     弃用
+#     """
+#     label_smoothing = 0.1
+#     return tf.losses.softmax_cross_entropy(y_ture, y_pred, label_smoothing=label_smoothing)
+
+
+def my_categorical_crossentropy_label_smoothing(target, output):
+    """
+        对标签y-hot 进行平滑操作
+        example:[0, 0, 1, 0, 0] ==> [0.25, 0.25, 0.9, 0.25, 0.25]
+        参考：https://www.lizenghai.com/archives/31315.html
+        这里采用tesorflow label smoothing 方法 见 tf.losses.softmax_cross_entropy()
+        """
+    label_smoothing = 0.1
+    num_classes = math_ops.cast(array_ops.shape(target)[1], output.dtype)
+    smooth_positives = 1.0 - label_smoothing
+    smooth_negatives = label_smoothing / num_classes
+    onehot_labels = target * smooth_positives + smooth_negatives
+    onehot_labels = array_ops.stop_gradient(onehot_labels, name="labels_stop_gradient")
+    return categorical_crossentropy(onehot_labels, output)
 
 
 def generator_batch(img_path_list, img_labels, nbr_classes,
                     img_width=64, img_height=128, batch_size=128, shuffle=False,
-                    return_label=True, img_resize=False, augment=False):
+                    return_label=True, augment=False):
     """
     generator for train
     :param img_labels:
@@ -59,12 +110,8 @@ def generator_batch(img_path_list, img_labels, nbr_classes,
 
             img_path = img_path_list[i]
 
-            # image resize
-            if img_resize:
-                row_img = cv2.imread(img_path)
-                img = cv2.resize(row_img, (img_width, img_height), interpolation=cv2.INTER_NEAREST)
-            else:
-                img = cv2.imread(img_path)
+            # loda image
+            img = cv2.imread(img_path)
 
             X_batch[i - current_index] = img
 
@@ -78,6 +125,8 @@ def generator_batch(img_path_list, img_labels, nbr_classes,
         # 预处理
         X_batch = X_batch.astype(np.float64)
         X_batch = preprocess_input(X_batch)
+        X_batch = (X_batch - np.array([0.485, 0.456, 0.406])) / np.array(
+            [0.229, 0.224, 0.225])  # 预处理在/255后也以继续减去均值在除以方差处理 该方法在tourch里面有
 
         # img = X_batch[0, :, :, :]
         # img = np.reshape(img, -1)
@@ -97,10 +146,16 @@ sometimes = lambda aug: iaa.Sometimes(0.5, aug)
 # All augmenters with per_channel=0.5 will sample one value _per image_
 # in 50% of all cases. In all other cases they will sample new values
 # _per channel_.
+
 seq = iaa.Sequential(
     [
         # apply the following augmenters to most images
         iaa.Fliplr(0.5),  # horizontally flip 50% of all images
+
+        # 1、加入Cutout数据增强方法优化试验##############################################
+        # iaa.Cutout(nb_iterations=1, size=0.2, squared=False),
+        ###################################################################################
+
         # crop images by -5% to 10% of their height/width
         sometimes(iaa.CropAndPad(
             percent=(-0.05, 0.1),
@@ -118,7 +173,7 @@ seq = iaa.Sequential(
         )),
         # execute 0 to 5 of the following (less important) augmenters per image
         # don't execute all of them, as that would often be way too strong
-        iaa.SomeOf((0, 3),
+        iaa.SomeOf((0, 3),  # 随机选取3个增强组件
                    [
                        iaa.OneOf([
                            iaa.GaussianBlur((0, 2.0)),  # blur images with a sigma between 0 and 3.0
